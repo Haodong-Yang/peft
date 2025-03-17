@@ -39,18 +39,21 @@ from .dora import DoraConv2dLayer, DoraConv3dLayer, DoraEmbeddingLayer, DoraLine
 
 class LoraLayer(BaseTunerLayer):
     # All names of layers that may contain (trainable) adapter weights
-    adapter_layer_names = ("lora_A", "lora_B", "lora_embedding_A", "lora_embedding_B")
+    adapter_layer_names = ("lora_A", "lora_B", "lora_E", "lora_embedding_A", "lora_embedding_B")
     # All names of other parameters that may contain adapter-related parameters
     other_param_names = ("r", "lora_alpha", "scaling", "lora_dropout")
 
     def __init__(self, base_layer: nn.Module, ephemeral_gpu_offload: bool = False, **kwargs) -> None:
-        self.base_layer = base_layer
+        # USV^T = W <-> VSU^T = W^T, where W^T = weight.data in R^{out_channel, in_channel},
+        self.U, self.S, self.Vh = torch.linalg.svd(base_layer.weight.data, full_matrices=False)
+        self.indices = {}
         self.r = {}
         self.lora_alpha = {}
         self.scaling = {}
         self.lora_dropout = nn.ModuleDict({})
         self.lora_A = nn.ModuleDict({})
         self.lora_B = nn.ModuleDict({})
+        self.lora_E = nn.ModuleDict({})
         # For Embedding layer
         self.lora_embedding_A = nn.ParameterDict({})
         self.lora_embedding_B = nn.ParameterDict({})
@@ -141,32 +144,37 @@ class LoraLayer(BaseTunerLayer):
         self.lora_dropout.update(nn.ModuleDict({adapter_name: lora_dropout_layer}))
         # Actual trainable parameters
         self.lora_A[adapter_name] = nn.Linear(self.in_features, r, bias=False)
-        self.lora_B[adapter_name] = nn.Linear(r, self.out_features, bias=lora_bias)
-        self.lora_bias[adapter_name] = lora_bias
+        self.lora_B[adapter_name] = nn.Linear(r, self.out_features, bias=False)
+        device = self.S.device
+        self.indices[adapter_name] = torch.randperm(self.S.numel(), device=device)[:8]
+        self.lora_A[adapter_name].weight.data = self.U[:, self.indices[adapter_name]] # to.device(device)
+        self.lora_B[adapter_name].weight.data = self.Vh[self.indices[adapter_name], :] # to.device(device)
+        self.lora_E[adapter_name].weight.data = self.S[self.indices[adapter_name]] # to.device(device)
+        # self.lora_bias[adapter_name] = lora_bias
 
         if use_rslora:
             self.scaling[adapter_name] = lora_alpha / math.sqrt(r)
         else:
             self.scaling[adapter_name] = lora_alpha / r
 
-        # for inits that require access to the base weight, use gather_param_ctx so that the weight is gathered when using DeepSpeed
-        if isinstance(init_lora_weights, str) and init_lora_weights.startswith("pissa"):
-            with gather_params_ctx(self.get_base_layer().weight):
-                self.pissa_init(adapter_name, init_lora_weights)
-        elif isinstance(init_lora_weights, str) and init_lora_weights.startswith("corda"):
-            with gather_params_ctx(self.get_base_layer().weight):
-                self.corda_init(adapter_name, init_lora_weights)
-        elif isinstance(init_lora_weights, str) and init_lora_weights.lower() == "olora":
-            with gather_params_ctx(self.get_base_layer().weight):
-                self.olora_init(adapter_name)
-        elif init_lora_weights == "loftq":
-            with gather_params_ctx(self.get_base_layer().weight):
-                self.loftq_init(adapter_name)
-        elif init_lora_weights == "eva":
-            nn.init.zeros_(self.lora_B[adapter_name].weight)
-        elif init_lora_weights:
-            self.reset_lora_parameters(adapter_name, init_lora_weights)
-        # call this before dora_init
+        # # for inits that require access to the base weight, use gather_param_ctx so that the weight is gathered when using DeepSpeed
+        # if isinstance(init_lora_weights, str) and init_lora_weights.startswith("pissa"):
+        #     with gather_params_ctx(self.get_base_layer().weight):
+        #         self.pissa_init(adapter_name, init_lora_weights)
+        # elif isinstance(init_lora_weights, str) and init_lora_weights.startswith("corda"):
+        #     with gather_params_ctx(self.get_base_layer().weight):
+        #         self.corda_init(adapter_name, init_lora_weights)
+        # elif isinstance(init_lora_weights, str) and init_lora_weights.lower() == "olora":
+        #     with gather_params_ctx(self.get_base_layer().weight):
+        #         self.olora_init(adapter_name)
+        # elif init_lora_weights == "loftq":
+        #     with gather_params_ctx(self.get_base_layer().weight):
+        #         self.loftq_init(adapter_name)
+        # elif init_lora_weights == "eva":
+        #     nn.init.zeros_(self.lora_B[adapter_name].weight)
+        # elif init_lora_weights:
+        #     self.reset_lora_parameters(adapter_name, init_lora_weights)
+        # # call this before dora_init
         self._move_adapter_to_device_of_base_layer(adapter_name)
 
         if use_dora:
@@ -709,39 +717,51 @@ class Linear(nn.Module, LoraLayer):
         elif self.merged:
             result = self.base_layer(x, *args, **kwargs)
         else:
-            result = self.base_layer(x, *args, **kwargs)
-            torch_result_dtype = result.dtype
+            # result = self.base_layer(x, *args, **kwargs)
+            # torch_result_dtype = result.dtype
 
             lora_A_keys = self.lora_A.keys()
             for active_adapter in self.active_adapters:
                 if active_adapter not in lora_A_keys:
                     continue
 
-                lora_A = self.lora_A[active_adapter]
-                lora_B = self.lora_B[active_adapter]
+                lora_A = self.lora_A[active_adapter].weight.detach()
+                lora_B = self.lora_B[active_adapter].weight.detach()
+                lora_E = self.lora_E[active_adapter].weight.detach()
+                self.U[:, self.indices[active_adapter]] = lora_A
+                self.Vh[self.indices[active_adapter], :] = lora_B
+                self.S[self.indices[active_adapter]] = lora_E
                 dropout = self.lora_dropout[active_adapter]
                 scaling = self.scaling[active_adapter]
                 x = self._cast_input_dtype(x, lora_A.weight.dtype)
 
-                if not self.use_dora[active_adapter]:
-                    result = result + lora_B(lora_A(dropout(x))) * scaling
-                else:
-                    if isinstance(dropout, nn.Identity) or not self.training:
-                        base_result = result
-                    else:
-                        x = dropout(x)
-                        base_result = None
+                result = (dropout(x) @ (self.U * self.S).T @ self.Vh) * scaling
 
-                    result = result + self.lora_magnitude_vector[active_adapter](
-                        x,
-                        lora_A=lora_A,
-                        lora_B=lora_B,
-                        scaling=scaling,
-                        base_layer=self.get_base_layer(),
-                        base_result=base_result,
-                    )
+                device = self.S.device
+                self.indices[active_adapter] = torch.randperm(self.S.numel(), device=device)[:8]
+                self.lora_A[active_adapter].weight.data = self.U[:, self.indices[active_adapter]] # to.device(device)
+                self.lora_B[active_adapter].weight.data = self.Vh[self.indices[active_adapter], :] # to.device(device)
+                self.lora_E[active_adapter].weight.data = self.S[self.indices[active_adapter]] # to.device(device)
 
-            result = result.to(torch_result_dtype)
+                # if not self.use_dora[active_adapter]:
+                #     result = result + lora_B(lora_A(dropout(x))) * scaling
+                # else:
+                #     if isinstance(dropout, nn.Identity) or not self.training:
+                #         base_result = result
+                #     else:
+                #         x = dropout(x)
+                #         base_result = None
+
+                #     result = result + self.lora_magnitude_vector[active_adapter](
+                #         x,
+                #         lora_A=lora_A,
+                #         lora_B=lora_B,
+                #         scaling=scaling,
+                #         base_layer=self.get_base_layer(),
+                #         base_result=base_result,
+                #     )
+
+            result = result
 
         return result
 
