@@ -45,7 +45,10 @@ class LoraLayer(BaseTunerLayer):
 
     def __init__(self, base_layer: nn.Module, ephemeral_gpu_offload: bool = False, **kwargs) -> None:
         # USV^T = W <-> VSU^T = W^T, where W^T = weight.data in R^{out_channel, in_channel},
-        self.U, self.S, self.Vh = torch.linalg.svd(base_layer.weight.data, full_matrices=False)
+        self.base_layer = base_layer
+        self.U = nn.ParameterDict({})
+        self.S = nn.ParameterDict({})      
+        self.Vh = nn.ParameterDict({})
         self.indices = {}
         self.r = {}
         self.lora_alpha = {}
@@ -134,6 +137,18 @@ class LoraLayer(BaseTunerLayer):
         if r <= 0:
             raise ValueError(f"`r` should be a positive integer value but the value passed is {r}")
 
+        weight = self.get_base_layer().weight
+        dtype = weight.dtype
+        # if dtype not in [torch.float32, torch.float16, torch.bfloat16]:
+        #     raise TypeError(
+        #         "Please initialize PiSSA under float32, float16, or bfloat16. "
+        #         "Subsequently, re-quantize the residual model to help minimize quantization errors."
+        #     )
+        weight = transpose(weight.to(torch.float32), self.fan_in_fan_out)
+        U, S, Vh = torch.linalg.svd(weight.data, full_matrices=False)
+        self.U[adapter_name] = nn.Parameter(U)
+        self.S[adapter_name] = nn.Parameter(S)
+        self.Vh[adapter_name] = nn.Parameter(Vh)
         self.r[adapter_name] = r
         self.lora_alpha[adapter_name] = lora_alpha
         if lora_dropout > 0.0:
@@ -145,11 +160,12 @@ class LoraLayer(BaseTunerLayer):
         # Actual trainable parameters
         self.lora_A[adapter_name] = nn.Linear(self.in_features, r, bias=False)
         self.lora_B[adapter_name] = nn.Linear(r, self.out_features, bias=False)
-        device = self.S.device
-        self.indices[adapter_name] = torch.randperm(self.S.numel(), device=device)[:8]
-        self.lora_A[adapter_name].weight.data = self.U[:, self.indices[adapter_name]] # to.device(device)
-        self.lora_B[adapter_name].weight.data = self.Vh[self.indices[adapter_name], :] # to.device(device)
-        self.lora_E[adapter_name].weight.data = self.S[self.indices[adapter_name]] # to.device(device)
+        self.lora_E[adapter_name] = nn.Linear(r, 1, bias=False)
+        device = self.S[adapter_name].device
+        self.indices[adapter_name] = torch.randperm(self.S[adapter_name].numel(), device=device)[:8]
+        self.lora_A[adapter_name].weight.data = self.U[adapter_name][:, self.indices[adapter_name]] # to.device(device)
+        self.lora_B[adapter_name].weight.data = self.Vh[adapter_name][self.indices[adapter_name], :] # to.device(device)
+        self.lora_E[adapter_name].weight.data = self.S[adapter_name][self.indices[adapter_name]] # to.device(device)
         # self.lora_bias[adapter_name] = lora_bias
 
         if use_rslora:
@@ -728,20 +744,20 @@ class Linear(nn.Module, LoraLayer):
                 lora_A = self.lora_A[active_adapter].weight.detach()
                 lora_B = self.lora_B[active_adapter].weight.detach()
                 lora_E = self.lora_E[active_adapter].weight.detach()
-                self.U[:, self.indices[active_adapter]] = lora_A
-                self.Vh[self.indices[active_adapter], :] = lora_B
-                self.S[self.indices[active_adapter]] = lora_E
+                self.U[active_adapter][:, self.indices[active_adapter]] = lora_A
+                self.Vh[active_adapter][self.indices[active_adapter], :] = lora_B
+                self.S[active_adapter][self.indices[active_adapter]] = lora_E
                 dropout = self.lora_dropout[active_adapter]
                 scaling = self.scaling[active_adapter]
-                x = self._cast_input_dtype(x, lora_A.weight.dtype)
+                x = self._cast_input_dtype(x, lora_A.dtype)
 
-                result = (dropout(x) @ (self.U * self.S).T @ self.Vh) * scaling
+                result = (dropout(x) @ (self.U[active_adapter] * self.S[active_adapter]).T @ self.Vh[active_adapter]) * scaling
 
-                device = self.S.device
-                self.indices[active_adapter] = torch.randperm(self.S.numel(), device=device)[:8]
-                self.lora_A[active_adapter].weight.data = self.U[:, self.indices[active_adapter]] # to.device(device)
-                self.lora_B[active_adapter].weight.data = self.Vh[self.indices[active_adapter], :] # to.device(device)
-                self.lora_E[active_adapter].weight.data = self.S[self.indices[active_adapter]] # to.device(device)
+                device = self.S[active_adapter].device
+                self.indices[active_adapter] = torch.randperm(self.S[active_adapter].numel(), device=device)[:8]
+                self.lora_A[active_adapter].weight.data = self.U[active_adapter][:, self.indices[active_adapter]] # to.device(device)
+                self.lora_B[active_adapter].weight.data = self.Vh[active_adapter][self.indices[active_adapter], :] # to.device(device)
+                self.lora_E[active_adapter].weight.data = self.S[active_adapter][self.indices[active_adapter]] # to.device(device)
 
                 # if not self.use_dora[active_adapter]:
                 #     result = result + lora_B(lora_A(dropout(x))) * scaling
