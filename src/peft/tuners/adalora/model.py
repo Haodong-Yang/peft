@@ -116,7 +116,7 @@ class AdaLoraModel(LoraModel):
         current_key,
     ):
         kwargs = {
-            "r": lora_config.init_r,
+            "r": lora_config.r,
             "lora_alpha": lora_config.lora_alpha,
             "lora_dropout": lora_config.lora_dropout,
             "fan_in_fan_out": lora_config.fan_in_fan_out,
@@ -145,7 +145,7 @@ class AdaLoraModel(LoraModel):
         else:
             target.update_layer(
                 adapter_name,
-                lora_config.init_r,
+                lora_config.r,
                 lora_config.lora_alpha,
                 lora_config.lora_dropout,
                 lora_config.init_lora_weights,
@@ -317,7 +317,7 @@ class AdaLoraModel(LoraModel):
                     )
         return state_dict
 
-    def update_and_allocate(self, global_step):
+    def update_and_allocate(self):
         """
         This method updates Adalora budget and mask.
 
@@ -338,27 +338,40 @@ class AdaLoraModel(LoraModel):
         >>> optimizer.zero_grad()
         ```
         """
+
+        # 每一个训练区间都要更新几个step
+        # 如果current_step在训练区间内，正常训练并计算score
+
+
+        # 如果current_step在训练区间边界，一部分保留在lora_A和lora_B中，另一部分融合回pretrained matrix, 并且重新初始化融合回去的组
+        # 对于lora_A和lora_B重新初始化score
+
+        # TODO: 在config里添加stage_num
+        # step_per_stage = lora_config.total_step // lora_config.stage_num
+        # current_stage = global_step // step_per_stage
+
+        # if current_stage == 0:
+        #     # TODO: First stage
+        #     pass
+        # # Final stage, just fine-tune
+        # elif current_stage == lora_config.stage_num - 1:
+        #     # TODO: final stage
+        #     pass
+        # else:
+        #     if global_step % step_per_stage == 0:
+        #         # TODO: switch and reinitialize
+        #         pass
+        #     else:
+
         lora_config = self.peft_config[self.trainable_adapter_name]
-        # Update the importance score and allocate the budget
-        if global_step < lora_config.total_step - lora_config.tfinal:
-            _, rank_pattern = self.rankallocator.update_and_allocate(self.model, global_step)
-            if rank_pattern:
-                lora_config.rank_pattern = rank_pattern
-        # Finalize the budget allocation
-        elif global_step == lora_config.total_step - lora_config.tfinal:
-            _, rank_pattern = self.rankallocator.update_and_allocate(self.model, global_step, force_mask=True)
-            # for some reason, this freezes the trainable parameters and nothing gets updates
-            # self.resize_modules_by_rank_pattern(rank_pattern, self.trainable_adapter_name)
-            lora_config.rank_pattern = rank_pattern
-            self.rankallocator.reset_ipt()
-        # Currently using inefficient way to mask the unimportant weights using the rank pattern
-        #  due to problem mentioned above
-        elif global_step > lora_config.total_step - lora_config.tfinal:
-            self.rankallocator.mask_using_rank_pattern(self.model, lora_config.rank_pattern)
-        # Pass the function and do forward propagation
-        else:
-            return None
+        # Update the importance score
+        _, rank_pattern = self.rankallocator.update_ipt(self.model)
 
     def add_weighted_adapter(self, *args, **kwargs):
         """This method is not supported for AdaLoRA, use LoRA instead."""
         raise TypeError(f"{self.__class__.__name__} does not support add_weighted_adapter method.")
+    
+    def switch(self):
+        self.rankallocator.mask_to_budget(self.model)
+        self.rankallocator.reset_ipt()
+
