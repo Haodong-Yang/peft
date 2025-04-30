@@ -190,7 +190,7 @@ class SVDLinear(nn.Module, AdaLoraLayer):
     
     def switch(self, index_list):
         '''
-        merge that in index_list bach to base_layer
+        merge that in index_list back to base_layer
         '''
         with torch.no_grad():
             for active_adapter in self.active_adapters:
@@ -204,7 +204,7 @@ class SVDLinear(nn.Module, AdaLoraLayer):
                 self.lora_B[active_adapter][:, index_list] = 0
 
                 self.base_layer.weight.data += merge_B @ merge_A
-
+                # TODO: change re-init method
                 U, S, Vh = torch.linalg.svd(self.base_layer.weight.data)
                 U = U[:, :self.r[active_adapter]]
                 S = S[:self.r[active_adapter]]
@@ -212,8 +212,8 @@ class SVDLinear(nn.Module, AdaLoraLayer):
 
                 merge_A = torch.zeros_like(self.lora_A[active_adapter])
                 merge_B = torch.zeros_like(self.lora_B[active_adapter])
-                merge_A[index_list, :] = U[index_list, :]
-                merge_B[:, index_list] = Vh[:, index_list]
+                merge_A[index_list, :] = Vh[index_list, :]
+                merge_B[:, index_list] = U[:, index_list]
                 self.lora_A[active_adapter] += merge_A
                 self.lora_B[active_adapter] += merge_B
                 self.base_layer.weight.data -= merge_B @ merge_A
@@ -244,7 +244,6 @@ class RankAllocator:
         self.r = peft_config.r
 
         self.reset_ipt()
-        # self._set_budget_scheduler(model)
 
     def set_total_step(self, total_step):
         self.peft_config.total_step = total_step
@@ -253,18 +252,6 @@ class RankAllocator:
         self.ipt = {}
         self.exp_avg_ipt = {}
         self.exp_avg_unc = {}
-
-    # def _set_budget_scheduler(self, model):
-    #     self.init_bgt = 0
-    #     self.name_set = set()
-    #     for n, p in model.named_parameters():
-    #         if f"lora_A.{self.adapter_name}" in n:
-    #             self.init_bgt += p.size(0)
-    #             self.name_set.add(n.replace("lora_A", "%s"))
-    #     self.name_set = sorted(self.name_set)
-    #     # The total final rank budget
-    #     self.target_bgt = self.peft_config.target_r * len(self.name_set)
-
 
     def update_ipt(self, model):
         # Update the sensitivity and uncertainty for every weight
@@ -298,7 +285,7 @@ class RankAllocator:
         return sum_ipt
 
     def mask_to_budget(self, model):
-        # Get the importance score for A, E, B
+        # Get the importance score for A, B
         with torch.no_grad():
             for module_name, module in model.named_modules():
                 if isinstance(module, SVDLinear):
@@ -343,25 +330,3 @@ class RankAllocator:
 
                     module.switch(index_list)
 
-    def update_and_allocate(self, model, global_step):
-        # # Update the importance score and allocate the budget
-        # if global_step < self.peft_config.total_step - self.peft_config.tfinal:
-        #     self.update_ipt(model)
-        # Allocate the budget according to importance scores
-        # if mask_ind:
-        #     rank_pattern = self.mask_to_budget(model, budget)
-        # return rank_pattern
-        pass
-
-    def mask_using_rank_pattern(self, model, rank_pattern):
-        # Mask the unimportant triplets
-        is_adapter_name_truncated = False
-        if self.adapter_name not in next(iter(rank_pattern.keys())):
-            is_adapter_name_truncated = True
-
-        with torch.no_grad():
-            for n, p in model.named_parameters():
-                if f"lora_E.{self.adapter_name}" in n:
-                    key = n if not is_adapter_name_truncated else n.replace(f".{self.adapter_name}", "")
-                    mask = torch.Tensor(rank_pattern[key]).unsqueeze(-1).to(p.device)
-                    p.masked_fill_(~mask.bool(), 0.0)

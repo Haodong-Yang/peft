@@ -363,10 +363,8 @@ class AdaLoraModel(LoraModel):
         #         pass
         #     else:
 
-        lora_config = self.peft_config[self.trainable_adapter_name]
         # Update the importance score
         self.rankallocator.update_ipt(self.model)
-        self.rankallocator.mask_to_budget(self.model)
 
     def add_weighted_adapter(self, *args, **kwargs):
         """This method is not supported for AdaLoRA, use LoRA instead."""
