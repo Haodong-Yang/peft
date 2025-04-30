@@ -66,6 +66,7 @@ class AdaLoraConfig(LoraConfig):
     orth_reg_weight: float = field(default=0.5, metadata={"help": "The orthogonal regularization coefficient."})
     total_step: Optional[int] = field(default=None, metadata={"help": "The total training steps."})
     rank_pattern: Optional[dict] = field(default=None, metadata={"help": "The saved rank pattern."})
+    p_keep: float = field(default=0.5, metadata={"help": "Initial Lora matrix dimension."})
 
     def __post_init__(self):
         super().__post_init__()

@@ -206,9 +206,9 @@ class SVDLinear(nn.Module, AdaLoraLayer):
                 self.base_layer.weight.data += merge_B @ merge_A
 
                 U, S, Vh = torch.linalg.svd(self.base_layer.weight.data)
-                U = U[:, :self.r]
-                S = S[:self.r]
-                Vh = Vh[:self.r, :]
+                U = U[:, :self.r[active_adapter]]
+                S = S[:self.r[active_adapter]]
+                Vh = Vh[:self.r[active_adapter], :]
 
                 merge_A = torch.zeros_like(self.lora_A[active_adapter])
                 merge_B = torch.zeros_like(self.lora_B[active_adapter])
@@ -328,14 +328,14 @@ class RankAllocator:
                     for name_m in vector_ipt:
                         ipt_AB = torch.cat(vector_ipt[name_m], dim=1)
                         sum_ipt = self._combine_ipt(ipt_AB)
-                        name_A = name_m % "lora_A"
-                        triplet_ipt[name_A] = sum_ipt.view(-1, 1)
+                        name_B = name_m % "lora_B"
+                        triplet_ipt[name_B] = sum_ipt.view(-1, 1)
                         all_score.append(sum_ipt.view(-1))
 
                     # Get the threshold by ranking ipt
                     mask_threshold = torch.kthvalue(
                         torch.cat(all_score),
-                        k=self.p_keep * self.r
+                        k=int(self.p_keep * self.r)
                     )[0].item()
                                 
                     rank_pattern = (~(triplet_ipt[n] <= mask_threshold)).view(-1).tolist()
@@ -348,9 +348,10 @@ class RankAllocator:
         # if global_step < self.peft_config.total_step - self.peft_config.tfinal:
         #     self.update_ipt(model)
         # Allocate the budget according to importance scores
-        if mask_ind:
-            rank_pattern = self.mask_to_budget(model, budget)
-        return rank_pattern
+        # if mask_ind:
+        #     rank_pattern = self.mask_to_budget(model, budget)
+        # return rank_pattern
+        pass
 
     def mask_using_rank_pattern(self, model, rank_pattern):
         # Mask the unimportant triplets
