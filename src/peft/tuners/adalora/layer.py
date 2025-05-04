@@ -45,6 +45,7 @@ class AdaLoraLayer(LoraLayer):
         self.lora_A = nn.ParameterDict({})
         self.lora_B = nn.ParameterDict({})
         self.ranknum = nn.ParameterDict({})
+        self.U, self.S, self.Vh = torch.linalg.svd(base_layer.weight.data, full_matrices=False)
 
     def update_layer(self, adapter_name, r, lora_alpha, lora_dropout, init_lora_weights):
         if r < 0:
@@ -205,10 +206,10 @@ class SVDLinear(nn.Module, AdaLoraLayer):
 
                 self.base_layer.weight.data += merge_B @ merge_A
                 # TODO: change re-init method
-                U, S, Vh = torch.linalg.svd(self.base_layer.weight.data)
-                U = U[:, :self.r[active_adapter]]
-                S = S[:self.r[active_adapter]]
-                Vh = Vh[:self.r[active_adapter], :]
+                # U, S, Vh = torch.linalg.svd(self.base_layer.weight.data)
+                U = self.U[:, :self.r[active_adapter]]
+                S = self.S[:self.r[active_adapter]]
+                Vh = self.Vh[:self.r[active_adapter], :]
 
                 merge_A = torch.zeros_like(self.lora_A[active_adapter])
                 merge_B = torch.zeros_like(self.lora_B[active_adapter])
