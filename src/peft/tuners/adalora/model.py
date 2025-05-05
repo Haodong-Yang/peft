@@ -317,7 +317,7 @@ class AdaLoraModel(LoraModel):
                     )
         return state_dict
 
-    def update_and_allocate(self):
+    def update_and_allocate(self, global_step):
         """
         This method updates Adalora budget and mask.
 
@@ -365,12 +365,18 @@ class AdaLoraModel(LoraModel):
 
         # Update the importance score
         self.rankallocator.update_ipt(self.model)
+        lora_config = self.peft_config[self.trainable_adapter_name]
+        switch_num = int((lora_config.target_r - lora_config.r) // (lora_config.r * (1 - lora_config.p_keep)))
+        switch_step_threhold = int(lora_config.total_step // switch_num)
+        if global_step % switch_step_threhold == 0:
+            self.rankallocator.mask_to_budget(self.model)
+            self.rankallocator.reset_ipt()
 
     def add_weighted_adapter(self, *args, **kwargs):
         """This method is not supported for AdaLoRA, use LoRA instead."""
         raise TypeError(f"{self.__class__.__name__} does not support add_weighted_adapter method.")
     
-    def switch(self):
-        self.rankallocator.mask_to_budget(self.model)
-        self.rankallocator.reset_ipt()
+    # def switch(self):
+    #     self.rankallocator.mask_to_budget(self.model)
+    #     self.rankallocator.reset_ipt()
 

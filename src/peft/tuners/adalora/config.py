@@ -56,7 +56,7 @@ class AdaLoraConfig(LoraConfig):
         rank_pattern (`list`): The allocated rank for each weight matrix by RankAllocator.
     """
 
-    # target_r: int = field(default=8, metadata={"help": "Target Lora matrix dimension."})
+    target_r: int = field(default=8, metadata={"help": "Target Lora matrix dimension."})
     # init_r: int = field(default=12, metadata={"help": "Initial Lora matrix dimension."})
     tinit: int = field(default=0, metadata={"help": "The steps of initial warmup."})
     tfinal: int = field(default=0, metadata={"help": "The steps of final warmup."})
