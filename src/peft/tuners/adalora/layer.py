@@ -211,10 +211,18 @@ class SVDLinear(nn.Module, AdaLoraLayer):
                 S = self.S[:self.r[active_adapter]]
                 Vh = self.Vh[:self.r[active_adapter], :]
 
+                device = self.lora_A[active_adapter].device
+                U = U.to(device)
+                S = S.to(device)
+                Vh = Vh.to(device)
+
+                sqrt_s = torch.sqrt(S)
+                sqrt_s = sqrt_s[index_list]
+
                 merge_A = torch.zeros_like(self.lora_A[active_adapter])
                 merge_B = torch.zeros_like(self.lora_B[active_adapter])
-                merge_A[index_list, :] = Vh[index_list, :]
-                merge_B[:, index_list] = U[:, index_list]
+                merge_A[index_list, :] = Vh[index_list, :] * sqrt_s.unsqueeze(1)
+                merge_B[:, index_list] = U[:, index_list] * sqrt_s.unsqueeze(0)
                 self.lora_A[active_adapter] += merge_A
                 self.lora_B[active_adapter] += merge_B
                 self.base_layer.weight.data -= merge_B @ merge_A
