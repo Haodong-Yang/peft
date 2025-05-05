@@ -46,6 +46,7 @@ class AdaLoraLayer(LoraLayer):
         self.lora_B = nn.ParameterDict({})
         self.ranknum = nn.ParameterDict({})
         self.U, self.S, self.Vh = torch.linalg.svd(base_layer.weight.data, full_matrices=False)
+        self.current_rank_start = {}
 
     def update_layer(self, adapter_name, r, lora_alpha, lora_dropout, init_lora_weights):
         if r < 0:
@@ -53,6 +54,7 @@ class AdaLoraLayer(LoraLayer):
             raise ValueError(f"`r` should be a positive integer or 0, but the value passed is {r}")
 
         self.r[adapter_name] = r
+        self.current_rank_start[adapter_name] = r
         self.lora_alpha[adapter_name] = lora_alpha
         if lora_dropout > 0.0:
             lora_dropout_layer = nn.Dropout(p=lora_dropout)
@@ -189,7 +191,7 @@ class SVDLinear(nn.Module, AdaLoraLayer):
 
         return result
     
-    def switch(self, index_list):
+    def switch(self, index_list, p_keep):
         '''
         merge that in index_list back to base_layer
         '''
@@ -205,11 +207,16 @@ class SVDLinear(nn.Module, AdaLoraLayer):
                 self.lora_B[active_adapter][:, index_list] = 0
 
                 self.base_layer.weight.data += merge_B @ merge_A
+
+                cut = (1 - p_keep) * self.r[active_adapter]
+                cut = int(cut)
+                switch_index = list(range(self.current_rank_start[active_adapter], self.current_rank_start[active_adapter] + cut))
+
+
                 # TODO: change re-init method
-                # U, S, Vh = torch.linalg.svd(self.base_layer.weight.data)
-                U = self.U[:, :self.r[active_adapter]]
-                S = self.S[:self.r[active_adapter]]
-                Vh = self.Vh[:self.r[active_adapter], :]
+                U = self.U[:, switch_index]
+                S = self.S[switch_index]
+                Vh = self.Vh[switch_index, :]
 
                 device = self.lora_A[active_adapter].device
                 U = U.to(device)
@@ -217,12 +224,11 @@ class SVDLinear(nn.Module, AdaLoraLayer):
                 Vh = Vh.to(device)
 
                 sqrt_s = torch.sqrt(S)
-                sqrt_s = sqrt_s[index_list]
 
                 merge_A = torch.zeros_like(self.lora_A[active_adapter])
                 merge_B = torch.zeros_like(self.lora_B[active_adapter])
-                merge_A[index_list, :] = Vh[index_list, :] * sqrt_s.unsqueeze(1)
-                merge_B[:, index_list] = U[:, index_list] * sqrt_s.unsqueeze(0)
+                merge_A[index_list, :] = Vh * sqrt_s.unsqueeze(1)
+                merge_B[:, index_list] = U * sqrt_s.unsqueeze(0)
                 self.lora_A[active_adapter] += merge_A
                 self.lora_B[active_adapter] += merge_B
                 self.base_layer.weight.data -= merge_B @ merge_A
@@ -337,5 +343,5 @@ class RankAllocator:
                     rank_pattern = (~(triplet_ipt[n] <= mask_threshold)).view(-1).tolist()
                     index_list = [i for i, keep in enumerate(rank_pattern) if keep]
 
-                    module.switch(index_list)
+                    module.switch(index_list, self.p_keep)
 
