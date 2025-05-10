@@ -23,9 +23,7 @@ from torch import nn
 from peft.tuners.lora import LoraLayer
 from peft.tuners.tuners_utils import check_adapters_to_merge
 from peft.utils import transpose
-from peft.utils.integrations import (
-    gather_params_ctx,
-)
+import math
 
 
 if packaging.version.parse(transformers.__version__) >= packaging.version.parse("4.33.0"):
@@ -80,8 +78,25 @@ class AdaLoraLayer(LoraLayer):
         self.scaling[adapter_name] = lora_alpha if lora_alpha > 0 else float(r)
         # TODO: add init method
         if isinstance(init_lora_weights, str) and init_lora_weights.startswith("pissa"):
-            with gather_params_ctx(self.get_base_layer().weight):
-                self.pissa_init(adapter_name, init_lora_weights)
+            U = self.U[:, :self.r[adapter_name]]
+            S = self.S[:self.r[adapter_name]]
+            Vh = self.Vh[:self.r[adapter_name], :]
+
+            # device = self.lora_A[active_adapter].device
+            # U = U.to(device)
+            # S = S.to(device)
+            # Vh = Vh.to(device)
+
+            sqrt_s = torch.sqrt(S)
+
+            merge_A = Vh * sqrt_s.unsqueeze(1)
+            merge_B = U * sqrt_s.unsqueeze(0)
+
+            self.lora_A[adapter_name] = merge_A
+            self.lora_B[adapter_name] = merge_B
+            self.base_layer.weight.data -= merge_B @ merge_A
+
+
         elif init_lora_weights:
             self.reset_lora_parameters(adapter_name)
 
@@ -90,9 +105,7 @@ class AdaLoraLayer(LoraLayer):
 
     def reset_lora_parameters(self, adapter_name):
         if adapter_name in self.lora_A.keys():
-            # nn.init.zeros_(self.lora_E[adapter_name])
-            nn.init.normal_(self.lora_A[adapter_name], mean=0.0, std=0.02)
-            nn.init.normal_(self.lora_B[adapter_name], mean=0.0, std=0.02)
+            nn.init.kaiming_uniform_(self.lora_A[adapter_name], a=math.sqrt(5))
 
 
 class SVDLinear(nn.Module, AdaLoraLayer):
@@ -346,7 +359,7 @@ class RankAllocator:
                         k=int(self.p_keep * self.r)
                     )[0].item()
                                 
-                    rank_pattern = (~(triplet_ipt[n] <= mask_threshold)).view(-1).tolist()
+                    rank_pattern = (triplet_ipt[n] <= mask_threshold).view(-1).tolist()
                     index_list = [i for i, keep in enumerate(rank_pattern) if keep]
 
                     module.switch(index_list, self.p_keep)
