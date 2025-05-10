@@ -23,6 +23,9 @@ from torch import nn
 from peft.tuners.lora import LoraLayer
 from peft.tuners.tuners_utils import check_adapters_to_merge
 from peft.utils import transpose
+from peft.utils.integrations import (
+    gather_params_ctx,
+)
 
 
 if packaging.version.parse(transformers.__version__) >= packaging.version.parse("4.33.0"):
@@ -76,7 +79,10 @@ class AdaLoraLayer(LoraLayer):
         self.ranknum[adapter_name].requires_grad = False
         self.scaling[adapter_name] = lora_alpha if lora_alpha > 0 else float(r)
         # TODO: add init method
-        if init_lora_weights:
+        if isinstance(init_lora_weights, str) and init_lora_weights.startswith("pissa"):
+            with gather_params_ctx(self.get_base_layer().weight):
+                self.pissa_init(adapter_name, init_lora_weights)
+        elif init_lora_weights:
             self.reset_lora_parameters(adapter_name)
 
         self._move_adapter_to_device_of_base_layer(adapter_name)
