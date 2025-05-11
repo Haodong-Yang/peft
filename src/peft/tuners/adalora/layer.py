@@ -38,15 +38,17 @@ class AdaLoraLayer(LoraLayer):
     # adapter_layer_names = ("lora_A", "lora_B", "lora_E", "lora_embedding_A", "lora_embedding_B")
     adapter_layer_names = ("lora_A", "lora_B", "lora_embedding_A", "lora_embedding_B")
     # All names of other parameters that may contain adapter-related parameters
-    other_param_names = ("r", "lora_alpha", "scaling", "lora_dropout", "ranknum")
+    other_param_names = ("r", "lora_alpha", "scaling", "lora_dropout")
 
     def __init__(self, base_layer: nn.Module) -> None:
         super().__init__(base_layer)
         # self.lora_E = nn.ParameterDict({})
         self.lora_A = nn.ParameterDict({})
         self.lora_B = nn.ParameterDict({})
-        self.ranknum = nn.ParameterDict({})
-        self.U, self.S, self.Vh = torch.linalg.svd(base_layer.weight.data, full_matrices=False)
+        # self.ranknum = nn.ParameterDict({})
+        self.U = None
+        self.S = None
+        self.Vh = None
         self.current_rank_start = {}
 
     def update_layer(self, adapter_name, r, lora_alpha, lora_dropout, init_lora_weights):
@@ -72,30 +74,37 @@ class AdaLoraLayer(LoraLayer):
         # Left singular vectors
         self.lora_B[adapter_name] = nn.Parameter(torch.randn(self.out_features, r))
         # The current rank
-        self.ranknum[adapter_name] = nn.Parameter(torch.randn(1), requires_grad=False)
-        self.ranknum[adapter_name].data.fill_(float(r))
-        self.ranknum[adapter_name].requires_grad = False
-        self.scaling[adapter_name] = lora_alpha if lora_alpha > 0 else float(r)
+        # self.ranknum[adapter_name] = nn.Parameter(torch.randn(1), requires_grad=False)
+        # self.ranknum[adapter_name].data.fill_(float(r))
+        # self.ranknum[adapter_name].requires_grad = False
+        self.scaling[adapter_name] = lora_alpha / r
         # TODO: add init method
         if isinstance(init_lora_weights, str) and init_lora_weights.startswith("pissa"):
+            weight = self.get_base_layer().weight
+            dtype = weight.dtype
+            if dtype not in [torch.float32, torch.float16, torch.bfloat16]:
+                raise TypeError(
+                    "Please initialize PiSSA under float32, float16, or bfloat16. "
+                    "Subsequently, re-quantize the residual model to help minimize quantization errors."
+                )
+            weight = transpose(weight.to(torch.float32), self.fan_in_fan_out)
+
+            self.U, self.S, self.Vh = torch.linalg.svd(weight.data, full_matrices=False)
+
             U = self.U[:, :self.r[adapter_name]]
             S = self.S[:self.r[adapter_name]]
             Vh = self.Vh[:self.r[adapter_name], :]
-
-            # device = self.lora_A[active_adapter].device
-            # U = U.to(device)
-            # S = S.to(device)
-            # Vh = Vh.to(device)
-
+            S = S / self.scaling[adapter_name]
             sqrt_s = torch.sqrt(S)
 
-            merge_A = Vh * sqrt_s.unsqueeze(1)
-            merge_B = U * sqrt_s.unsqueeze(0)
+            LoRA_A = Vh * sqrt_s.unsqueeze(1)
+            LoRA_B = U * sqrt_s.unsqueeze(0)
+            self.lora_A[adapter_name] = LoRA_A
+            self.lora_B[adapter_name] = LoRA_B
 
-            self.lora_A[adapter_name] = merge_A
-            self.lora_B[adapter_name] = merge_B
-            self.base_layer.weight.data -= merge_B @ merge_A
-
+            weight = weight.data - self.scaling[adapter_name] * LoRA_B @ LoRA_A
+            weight = transpose(weight.to(dtype), self.fan_in_fan_out)
+            self.get_base_layer().weight.data = weight
 
         elif init_lora_weights:
             self.reset_lora_parameters(adapter_name)
@@ -106,6 +115,7 @@ class AdaLoraLayer(LoraLayer):
     def reset_lora_parameters(self, adapter_name):
         if adapter_name in self.lora_A.keys():
             nn.init.kaiming_uniform_(self.lora_A[adapter_name], a=math.sqrt(5))
+            nn.init.zeros_(self.lora_B[adapter_name].weight)
 
 
 class SVDLinear(nn.Module, AdaLoraLayer):
@@ -183,7 +193,6 @@ class SVDLinear(nn.Module, AdaLoraLayer):
         return (
             transpose(self.lora_B[adapter] @ self.lora_A[adapter], self.fan_in_fan_out)
             * self.scaling[adapter]
-            / (self.ranknum[adapter] + 1e-5)
         )
 
     def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
@@ -203,10 +212,10 @@ class SVDLinear(nn.Module, AdaLoraLayer):
                 # lora_E = self.lora_E[active_adapter]
                 dropout = self.lora_dropout[active_adapter]
                 scaling = self.scaling[active_adapter]
-                ranknum = self.ranknum[active_adapter] + 1e-5
+                # ranknum = self.ranknum[active_adapter] + 1e-5
 
                 x = self._cast_input_dtype(x, lora_A.dtype)
-                result += (dropout(x) @ lora_A.T @ lora_B.T) * scaling / ranknum
+                result += (dropout(x) @ lora_A.T @ lora_B.T) * scaling
 
         return result
     
@@ -235,6 +244,7 @@ class SVDLinear(nn.Module, AdaLoraLayer):
                 # TODO: change re-init method
                 U = self.U[:, switch_index]
                 S = self.S[switch_index]
+                S = S / self.scaling[active_adapter]
                 Vh = self.Vh[switch_index, :]
 
                 device = self.lora_A[active_adapter].device
@@ -250,7 +260,7 @@ class SVDLinear(nn.Module, AdaLoraLayer):
                 merge_B[:, index_list] = U * sqrt_s.unsqueeze(0)
                 self.lora_A[active_adapter] += merge_A
                 self.lora_B[active_adapter] += merge_B
-                self.base_layer.weight.data -= merge_B @ merge_A
+                self.base_layer.weight.data -= self.scaling[active_adapter] * merge_B @ merge_A
 
     def __repr__(self) -> str:
         rep = super().__repr__()
