@@ -24,6 +24,9 @@ from peft.tuners.lora import LoraLayer
 from peft.tuners.tuners_utils import check_adapters_to_merge
 from peft.utils import transpose
 import math
+from peft.utils.integrations import (
+    gather_params_ctx,
+)
 
 
 if packaging.version.parse(transformers.__version__) >= packaging.version.parse("4.33.0"):
@@ -80,31 +83,32 @@ class AdaLoraLayer(LoraLayer):
         self.scaling[adapter_name] = lora_alpha / r
         # TODO: add init method
         if isinstance(init_lora_weights, str) and init_lora_weights.startswith("pissa"):
-            weight = self.get_base_layer().weight
-            dtype = weight.dtype
-            if dtype not in [torch.float32, torch.float16, torch.bfloat16]:
-                raise TypeError(
-                    "Please initialize PiSSA under float32, float16, or bfloat16. "
-                    "Subsequently, re-quantize the residual model to help minimize quantization errors."
-                )
-            weight = transpose(weight.to(torch.float32), self.fan_in_fan_out)
+            with gather_params_ctx(self.get_base_layer().weight):
+                weight = self.get_base_layer().weight
+                dtype = weight.dtype
+                if dtype not in [torch.float32, torch.float16, torch.bfloat16]:
+                    raise TypeError(
+                        "Please initialize PiSSA under float32, float16, or bfloat16. "
+                        "Subsequently, re-quantize the residual model to help minimize quantization errors."
+                    )
+                weight = transpose(weight.to(torch.float32), self.fan_in_fan_out)
 
-            self.U, self.S, self.Vh = torch.linalg.svd(weight.data, full_matrices=False)
+                self.U, self.S, self.Vh = torch.linalg.svd(weight.data, full_matrices=False)
 
-            U = self.U[:, :self.r[adapter_name]]
-            S = self.S[:self.r[adapter_name]]
-            Vh = self.Vh[:self.r[adapter_name], :]
-            S = S / self.scaling[adapter_name]
-            sqrt_s = torch.sqrt(S)
+                U = self.U[:, :self.r[adapter_name]]
+                S = self.S[:self.r[adapter_name]]
+                Vh = self.Vh[:self.r[adapter_name], :]
+                S = S / self.scaling[adapter_name]
+                sqrt_s = torch.sqrt(S)
 
-            LoRA_A = Vh * sqrt_s.unsqueeze(1)
-            LoRA_B = U * sqrt_s.unsqueeze(0)
-            self.lora_A[adapter_name] = LoRA_A
-            self.lora_B[adapter_name] = LoRA_B
+                LoRA_A = Vh * sqrt_s.unsqueeze(1)
+                LoRA_B = U * sqrt_s.unsqueeze(0)
+                self.lora_A[adapter_name] = LoRA_A
+                self.lora_B[adapter_name] = LoRA_B
 
-            weight = weight.data - self.scaling[adapter_name] * LoRA_B @ LoRA_A
-            weight = transpose(weight.to(dtype), self.fan_in_fan_out)
-            self.get_base_layer().weight.data = weight
+                weight = weight.data - self.scaling[adapter_name] * LoRA_B @ LoRA_A
+                weight = transpose(weight.to(dtype), self.fan_in_fan_out)
+                self.get_base_layer().weight.data = weight
 
         elif init_lora_weights:
             self.reset_lora_parameters(adapter_name)
