@@ -12,21 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict, Type, Union
+from typing import Union
 
 import torch
 from torch import nn
 
 from peft.tuners.lycoris_utils import LycorisConfig, LycorisTuner
+from peft.utils import TRANSFORMERS_MODELS_TO_LOHA_TARGET_MODULES_MAPPING
 from peft.utils.other import get_pattern_key
 
-from .layer import Conv2d, Linear, LoHaLayer
+from .layer import Conv1d, Conv2d, Linear, LoHaLayer
 
 
 class LoHaModel(LycorisTuner):
     """
     Creates Low-Rank Hadamard Product model from a pretrained model. The method is partially described in
-    https://arxiv.org/abs/2108.06098 Current implementation heavily borrows from
+    https://huggingface.co/papers/2108.06098 Current implementation heavily borrows from
     https://github.com/KohakuBlueleaf/LyCORIS/blob/eb460098187f752a5d66406d3affade6f0a07ece/lycoris/modules/loha.py
 
     Args:
@@ -82,8 +83,11 @@ class LoHaModel(LycorisTuner):
     """
 
     prefix: str = "hada_"
-    layers_mapping: Dict[Type[torch.nn.Module], Type[LoHaLayer]] = {
+    tuner_layer_cls = LoHaLayer
+    target_module_mapping = TRANSFORMERS_MODELS_TO_LOHA_TARGET_MODULES_MAPPING
+    layers_mapping: dict[type[torch.nn.Module], type[LoHaLayer]] = {
         torch.nn.Conv2d: Conv2d,
+        torch.nn.Conv1d: Conv1d,
         torch.nn.Linear: Linear,
     }
 

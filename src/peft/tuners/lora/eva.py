@@ -14,12 +14,12 @@
 
 import warnings
 from collections import Counter, defaultdict
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import nullcontext
-from copy import deepcopy
+from copy import copy, deepcopy
 from functools import partial
 from itertools import cycle
-from typing import Dict, Iterable, Optional, Union
+from typing import Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -293,7 +293,7 @@ def _get_eva_state_dict(
     target_module_check_fn: callable,
     forward_fn: Optional[callable],
     prepare_model_inputs_fn: Optional[callable],
-    prepare_layer_inputs_fn: Union[callable, Dict[str, callable], None],
+    prepare_layer_inputs_fn: Union[callable, dict[str, callable], None],
     gather_distributed_inputs: bool,
     show_progress_bar: bool,
 ) -> dict:
@@ -491,14 +491,7 @@ def _load_eva_state_dict(
     eva_state_dict: dict,
     adapter_name: str,
 ):
-    peft_config = model.peft_config[adapter_name]
-    update_layer_kwargs = {
-        "adapter_name": adapter_name,
-        "lora_dropout": peft_config.lora_dropout,
-        "use_rslora": peft_config.use_rslora,
-        "use_dora": peft_config.use_dora,
-        "lora_bias": peft_config.lora_bias,
-    }
+    peft_config = copy(model.peft_config[adapter_name])
     missing_eva_inits = []
     new_target_modules = []
     other_module_names = []
@@ -525,11 +518,13 @@ def _load_eva_state_dict(
                 if peft_config.eva_config.adjust_scaling_factors:
                     alpha *= new_rank / r
             if new_rank != r or module.lora_A[adapter_name].weight.device.type == "meta":
-                module.update_layer(r=new_rank, lora_alpha=alpha, init_lora_weights="eva", **update_layer_kwargs)
+                peft_config.init_lora_weights = "eva"
+                module.update_layer(adapter_name=adapter_name, r=new_rank, lora_alpha=alpha, config=peft_config)
             module.lora_A[adapter_name].weight.copy_(w)
             new_target_modules.append(name_in_base_model)
         else:
-            module.update_layer(r=r, lora_alpha=alpha, init_lora_weights=True, **update_layer_kwargs)
+            peft_config.init_lora_weights = True
+            module.update_layer(adapter_name=adapter_name, r=r, lora_alpha=alpha, config=peft_config)
             missing_eva_inits.append(name_in_base_model)
             new_rank = r
         # update rank pattern and alpha pattern
@@ -565,7 +560,7 @@ def get_eva_state_dict(
     peft_config: Optional[LoraConfig] = None,
     forward_fn: Optional[callable] = forward_fn_dict,
     prepare_model_inputs_fn: Optional[callable] = prepare_model_inputs_fn_language_modeling,
-    prepare_layer_inputs_fn: Union[callable, Dict[str, callable], None] = prepare_layer_inputs_fn_language_modeling,
+    prepare_layer_inputs_fn: Union[callable, dict[str, callable], None] = prepare_layer_inputs_fn_language_modeling,
     adapter_name: str = "default",
     gather_distributed_inputs: bool = True,
     show_progress_bar: bool = True,
@@ -663,7 +658,7 @@ def initialize_lora_eva_weights(
     eva_state_dict: Optional[dict] = None,
     forward_fn: Optional[callable] = forward_fn_dict,
     prepare_model_inputs_fn: Optional[callable] = prepare_model_inputs_fn_language_modeling,
-    prepare_layer_inputs_fn: Union[callable, Dict[str, callable], None] = prepare_layer_inputs_fn_language_modeling,
+    prepare_layer_inputs_fn: Union[callable, dict[str, callable], None] = prepare_layer_inputs_fn_language_modeling,
     adapter_name: str = "default",
     gather_distributed_inputs: bool = True,
     show_progress_bar: bool = True,

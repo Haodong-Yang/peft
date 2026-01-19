@@ -20,25 +20,24 @@ from peft.tuners.lora.layer import LoraLayer
 from peft.tuners.tuners_utils import BaseTunerLayer
 from peft.utils import get_auto_gptq_quant_linear
 
+from .config import LoraConfig
+from .layer import LoraVariant
+
 
 class GPTQLoraLinear(torch.nn.Module, LoraLayer):
     def __init__(
         self,
         base_layer,
         adapter_name: str,
+        config: LoraConfig,
         r: int = 0,
         lora_alpha: int = 1,
-        lora_dropout: float = 0.0,
-        init_lora_weights: bool = True,
-        use_rslora: bool = False,
-        use_dora: bool = False,
-        lora_bias: bool = False,
         **kwargs,
     ):
         super().__init__()
         LoraLayer.__init__(self, base_layer)
 
-        if use_dora:
+        if config.use_dora:
             raise ValueError(f"{self.__class__.__name__} does not support DoRA yet, please set it to False")
 
         # self.base_layer and self.quant_linear_module are the same; we need the former for consistency and the latter
@@ -49,12 +48,25 @@ class GPTQLoraLinear(torch.nn.Module, LoraLayer):
             adapter_name,
             r,
             lora_alpha=lora_alpha,
-            lora_dropout=lora_dropout,
-            init_lora_weights=init_lora_weights,
-            use_rslora=use_rslora,
-            use_dora=use_dora,
-            lora_bias=lora_bias,
+            config=config,
         )
+
+    def resolve_lora_variant(self, *, config: LoraConfig, **kwargs) -> Optional[LoraVariant]:
+        if config.use_dora and config.use_qalora:
+            raise NotImplementedError(
+                f"DoRA and QA-LoRA at the same time is not supported for {self.__class__.__name__} (yet)."
+            )
+        elif config.use_dora:
+            from .variants import DoraLinearVariant
+
+            variant = DoraLinearVariant()
+        elif config.use_qalora:
+            from .variants import QALoraLinearVariant
+
+            variant = QALoraLinearVariant()
+        else:
+            variant = None
+        return variant
 
     def forward(self, x: torch.Tensor):
         # note: logic differs from default Linear because merging is not supported
@@ -64,29 +76,30 @@ class GPTQLoraLinear(torch.nn.Module, LoraLayer):
             return result
 
         lora_A_keys = self.lora_A.keys()
+
         for active_adapter in self.active_adapters:
             if active_adapter not in lora_A_keys:
                 continue
+            torch_result_dtype = result.dtype
 
             lora_A = self.lora_A[active_adapter]
             lora_B = self.lora_B[active_adapter]
             dropout = self.lora_dropout[active_adapter]
             scaling = self.scaling[active_adapter]
 
-            requires_conversion = not torch.is_autocast_enabled()
-            if requires_conversion:
-                expected_dtype = result.dtype
-                x = self._cast_input_dtype(x, lora_A.weight.dtype)
+            x = self._cast_input_dtype(x, lora_A.weight.dtype)
 
-            output = lora_B(lora_A(dropout(x)))
+            if active_adapter not in self.lora_variant:  # vanilla LoRA
+                result = result + lora_B(lora_A(dropout(x))) * scaling
+            else:
+                result = self.lora_variant[active_adapter].forward(
+                    self,
+                    active_adapter=active_adapter,
+                    x=x,
+                    result=result,
+                )
 
-            if requires_conversion:
-                output = output.to(expected_dtype)
-
-            if scaling != 1:  # skip scaling == 1 no-op
-                output = output * scaling
-
-            result += output
+            result = result.to(torch_result_dtype)
         return result
 
     def __repr__(self) -> str:
@@ -103,6 +116,7 @@ class GPTQLoraLinear(torch.nn.Module, LoraLayer):
 def dispatch_gptq(
     target: torch.nn.Module,
     adapter_name: str,
+    config: LoraConfig,
     **kwargs: Any,
 ) -> Optional[torch.nn.Module]:
     new_module = None
@@ -118,13 +132,13 @@ def dispatch_gptq(
         from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
         if isinstance(target_base_layer, BaseQuantLinear):
-            new_module = GPTQLoraLinear(target, adapter_name, **kwargs)
+            new_module = GPTQLoraLinear(target, adapter_name, config=config, **kwargs)
             target.qweight = target_base_layer.qweight
     else:
         quant_linear = get_auto_gptq_quant_linear(cfg)
 
         if quant_linear is not None and isinstance(target_base_layer, quant_linear):
-            new_module = GPTQLoraLinear(target, adapter_name, **kwargs)
+            new_module = GPTQLoraLinear(target, adapter_name, config=config, **kwargs)
             target.qweight = target_base_layer.qweight
 
     return new_module
